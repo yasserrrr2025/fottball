@@ -13,17 +13,25 @@ export async function verifyIbanFromFile(buffer: Buffer, mimeType: string, enter
     return { extractedIban: null, status: "unsupported", confidence: null };
   }
   try {
-    const { recognize } = await import("tesseract.js");
-    const result = await recognize(buffer, "eng");
-    const compact = normalizeIban(result.data.text);
-    const matches = compact.match(/SA\d{22}/g) ?? [];
-    const extracted = matches[0] ?? null;
-    if (!extracted) return { extractedIban: null, status: "not_found", confidence: result.data.confidence ?? null };
-    return {
-      extractedIban: extracted,
-      status: extracted === normalizeIban(enteredIban) ? "matched" : "mismatched",
-      confidence: result.data.confidence ?? null,
-    };
+    const ocrPromise = (async () => {
+      const { recognize } = await import("tesseract.js");
+      const result = await recognize(buffer, "eng");
+      const compact = normalizeIban(result.data.text);
+      const matches = compact.match(/SA\d{22}/g) ?? [];
+      const extracted = matches[0] ?? null;
+      if (!extracted) return { extractedIban: null, status: "not_found" as const, confidence: result.data.confidence ?? null };
+      return {
+        extractedIban: extracted,
+        status: extracted === normalizeIban(enteredIban) ? ("matched" as const) : ("mismatched" as const),
+        confidence: result.data.confidence ?? null,
+      };
+    })();
+
+    const timeoutPromise = new Promise<OcrResult>((resolve) => {
+      setTimeout(() => resolve({ extractedIban: null, status: "failed", confidence: null }), 3000);
+    });
+
+    return await Promise.race([ocrPromise, timeoutPromise]);
   } catch {
     return { extractedIban: null, status: "failed", confidence: null };
   }

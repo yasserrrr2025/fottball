@@ -58,6 +58,7 @@ export default function PlayerPortal() {
     setMessage("");
     if (!BANKS.includes(bankName as (typeof BANKS)[number])) return setMessage("اختر اسم البنك من القائمة الظاهرة.");
     if (!file && !student?.submission?.iban_attachment_path) return setMessage("أرفق صورة أو ملف شهادة الآيبان.");
+    if (file && file.size > 4 * 1024 * 1024) return setMessage("حجم الملف كبير جداً. يرجى اختيار ملف بحجم أقل من 4MB.");
     setLoading(true);
     const body = new FormData();
     body.set("nationalId", nationalId);
@@ -70,10 +71,15 @@ export default function PlayerPortal() {
     if (file) body.set("attachment", file);
     try {
       const response = await fetch("/api/student/submit", { method: "POST", body });
-      const result = await response.json();
+      let result;
+      try {
+        result = await response.json();
+      } catch (_e) {
+        throw new Error("تعذر معالجة المرفق في السيرفر. يرجى التأكد من أن حجم الملف أقل من 4MB ومن نوع صورة أو PDF.");
+      }
       if (!response.ok) throw new Error(result.message || "تعذر إرسال الطلب");
       setSubmitted(true);
-    } catch (error) { setMessage(error instanceof Error ? error.message : "حدث خطأ"); }
+    } catch (error) { setMessage(error instanceof Error ? error.message : "حدث خطأ أثناء حفظ البيانات."); }
     finally { setLoading(false); }
   }
 

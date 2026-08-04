@@ -12,7 +12,12 @@ export default function AdminDashboard(){
  const [students,setStudents]=useState<Student[]>([]); const [submissions,setSubmissions]=useState<Submission[]>([]); const [tab,setTab]=useState<"requests"|"students">("requests"); const [filter,setFilter]=useState("all"); const [search,setSearch]=useState(""); const [fullName,setFullName]=useState(""); const [nationalId,setNationalId]=useState(""); const [busy,setBusy]=useState(false); const [details,setDetails]=useState<any>(null);
  useEffect(()=>{supabase.auth.getSession().then(({data})=>setSession(data.session));const {data}=supabase.auth.onAuthStateChange((_e,s)=>setSession(s));return()=>data.subscription.unsubscribe()},[supabase]); useEffect(()=>{if(session)loadData()},[session]);
  async function authHeader(){const {data}=await supabase.auth.getSession();return{authorization:`Bearer ${data.session?.access_token}`}}
- async function login(e:React.FormEvent){e.preventDefault();const {error}=await supabase.auth.signInWithPassword({email,password});if(error)setError("بيانات الدخول غير صحيحة.")}
+ async function login(e:React.FormEvent){
+  e.preventDefault();
+  setError("");
+  const {error} = await supabase.auth.signInWithPassword({email: email.trim(), password});
+  if(error) setError(error.message || "بيانات الدخول غير صحيحة.");
+ }
  async function loadData(){setBusy(true);const [s,r]=await Promise.all([supabase.from("students").select("id,full_name,national_id,is_active,submissions(status)").order("created_at",{ascending:false}),supabase.from("submissions").select("id,status,has_student_bank_account,student_iban,guardian_name,guardian_phone,guardian_iban,bank_name,iban_match_status,extracted_iban,return_reason,submitted_at,consent_accepted,students(full_name,national_id)").order("submitted_at",{ascending:false})]);if(s.error||r.error)setError("تأكد من تشغيل ملف الترقية وإضافة حسابك في admin_users.");setStudents((s.data as any)||[]);setSubmissions((r.data as any)||[]);setBusy(false)}
  async function addStudent(e:React.FormEvent){e.preventDefault();const res=await fetch("/api/admin/students/manual",{method:"POST",headers:{"content-type":"application/json",...(await authHeader())},body:JSON.stringify({fullName,nationalId})});const j=await res.json();if(!res.ok)return setError(j.message);setFullName("");setNationalId("");loadData()}
  async function importExcel(file:File){const body=new FormData();body.set("file",file);const res=await fetch("/api/admin/students/import",{method:"POST",headers:await authHeader(),body});const j=await res.json();if(!res.ok)return setError(j.message);alert(`تم استيراد ${j.imported} طالب`);loadData()}
