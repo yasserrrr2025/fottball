@@ -21,71 +21,100 @@ export async function POST(request: Request) {
 
     const workbook = XLSX.read(await file.arrayBuffer(), { type: "array" });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
-    const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: "" });
+    
+    // قراءة أسطر الملف كمصفوفة ثنائية الأبعاد بدون فرض ترويسات محددة
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: "" });
 
-    if (rows.length === 0) {
+    if (matrix.length === 0) {
       return NextResponse.json({ message: "الملف المرفق فارغ ولا يحتوي على بيانات." }, { status: 400 });
     }
-    if (rows.length > 1000) {
+    if (matrix.length > 1000) {
       return NextResponse.json({ message: "الحد الأقصى 1000 طالب في الملف." }, { status: 400 });
     }
 
     const invalid: Candidate[] = [];
     const validMap = new Map<string, Candidate>();
     const duplicates: Candidate[] = [];
+    let processedRowsCount = 0;
 
-    rows.forEach((row, index) => {
-      const keys = Object.keys(row);
-      const rowNum = index + 2;
+    matrix.forEach((rowCells, index) => {
+      if (!Array.isArray(rowCells) || rowCells.length === 0) return;
 
-      // البحث عن الأعمدة بحسب الاسم أو الترتيب الافتراضي
-      const nameKey = keys.find((k) => /اسم|طالب|student|name/i.test(k)) ?? keys[0];
-      const idKey = keys.find((k) => /هوي|إقام|سجل|national|identity|id/i.test(k)) ?? keys[1];
+      const rowNum = index + 1;
+      const stringCells = rowCells.map(c => {
+        if (typeof c === "number") return Math.round(c).toString();
+        return String(c ?? "").trim();
+      });
 
-      const rawName = String(row[nameKey] ?? "").trim();
-      let rawId = String(row[idKey] ?? "").trim();
+      const rowLine = stringCells.join(" ").trim();
+      if (!rowLine) return; // سطر فارغ
 
-      // التحويل الذكي في حال تحويل Excel الأرقام الكبيرة إلى صيغة علمية
-      if (typeof row[idKey] === "number") {
-        rawId = Math.round(row[idKey] as number).toString();
-      }
-      rawId = rawId.replace(/\D/g, "");
-
-      if (rawId.length > 0 && rawId.length < 10) {
-        rawId = rawId.padStart(10, "0");
+      // تجاهل صف الترويسة الرئيسية مثل (اسم الطالب، رقم الهوية، حالة التسجيل)
+      if (/اسم.*طالب|رقم.*هوية|حالة.*تسجيل|تحديد|ملاحظات/i.test(rowLine) && !/\d{9,10}/.test(rowLine)) {
+        return;
       }
 
-      if (rawName.length < 4) {
+      processedRowsCount++;
+
+      let foundName = "";
+      let foundId = "";
+
+      // استخراج الاسم ورقم الهوية بذكاء من خلايا الصف
+      stringCells.forEach((cell) => {
+        const cleanDigits = cell.replace(/\D/g, "");
+        
+        // إذا كانت الخلية تحتوي على 10 أرقام (أو 8-9 أرقام وتحتاج إكمال)
+        if (/^\d{10}$/.test(cleanDigits)) {
+          foundId = cleanDigits;
+        } else if (cleanDigits.length >= 8 && cleanDigits.length <= 10 && /^\d+$/.test(cell.trim())) {
+          foundId = cleanDigits.padStart(10, "0");
+        } else if (cell.length >= 3 && !/^\d+$/.test(cell) && !/لم يعبئ|معتمد|مرفوض|بانتظار/i.test(cell)) {
+          if (!foundName || cell.length > foundName.length) {
+            foundName = cell;
+          }
+        }
+      });
+
+      // افتراض احتياطي في حال كان ترتيب الخلايا [الاسم، رقم الهوية]
+      if (!foundName && stringCells[0] && !/^\d+$/.test(stringCells[0])) {
+        foundName = stringCells[0];
+      }
+      if (!foundId && stringCells[1]) {
+        const digits = stringCells[1].replace(/\D/g, "");
+        if (digits.length >= 8) foundId = digits.padStart(10, "0");
+      }
+
+      if (foundName.length < 4) {
         invalid.push({ 
           row: rowNum, 
-          full_name: rawName || "غير محدد", 
-          national_id: rawId || "مفقود", 
-          reason: "اسم الطالب غير كامل (أقل من 4 أحرف)" 
+          full_name: foundName || "غير محدد", 
+          national_id: foundId || "مفقود", 
+          reason: "اسم الطالب مفقود أو غير كامل (أقل من 4 أحرف)" 
         });
         return;
       }
 
-      if (!/^\d{10}$/.test(rawId)) {
+      if (!/^\d{10}$/.test(foundId)) {
         invalid.push({ 
           row: rowNum, 
-          full_name: rawName, 
-          national_id: rawId || "مفقود", 
-          reason: "رقم الهوية أو الإقامة غير صحيح (يجب أن يتكون من 10 أرقام)" 
+          full_name: foundName, 
+          national_id: foundId || "مفقود", 
+          reason: "رقم الهوية غير صحيح (يجب أن يتكون من 10 أرقام)" 
         });
         return;
       }
 
-      if (validMap.has(rawId)) {
+      if (validMap.has(foundId)) {
         duplicates.push({ 
           row: rowNum, 
-          full_name: rawName, 
-          national_id: rawId, 
-          reason: `رقم الهوية مكرر في الملف مع الطالب (${validMap.get(rawId)?.full_name})` 
+          full_name: foundName, 
+          national_id: foundId, 
+          reason: `رقم الهوية مكرر في الملف مع الطالب (${validMap.get(foundId)?.full_name})` 
         });
         return;
       }
 
-      validMap.set(rawId, { row: rowNum, full_name: rawName, national_id: rawId });
+      validMap.set(foundId, { row: rowNum, full_name: foundName, national_id: foundId });
     });
 
     const candidatesToInsert = Array.from(validMap.values());
@@ -111,9 +140,10 @@ export async function POST(request: Request) {
 
     return NextResponse.json({
       ok: true,
-      totalRows: rows.length,
+      imported: importedCount,
       importedCount,
       validCount: candidatesToInsert.length,
+      totalRows: processedRowsCount,
       invalid,
       duplicates,
     });

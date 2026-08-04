@@ -504,8 +504,8 @@ export default function AdminDashboard() {
             <button className="welcome-close" onClick={() => setImportReport(null)}>×</button>
             <h2>📊 تقرير استيراد ملف Excel</h2>
             <div className="stats" style={{ margin: "16px 0" }}>
-              <article><span>إجمالي الأسطر</span><strong>{importReport.totalRows}</strong></article>
-              <article><span>تمت الإضافة بنجاح</span><strong style={{ color: "#86efac" }}>{importReport.importedCount}</strong></article>
+              <article><span>إجمالي الأسطر</span><strong>{importReport.totalRows || 0}</strong></article>
+              <article><span>تمت الإضافة بنجاح</span><strong style={{ color: "#86efac" }}>{importReport.importedCount ?? importReport.imported ?? 0}</strong></article>
               <article><span>صفوف مكررة</span><strong style={{ color: "#fde047" }}>{importReport.duplicates?.length || 0}</strong></article>
               <article><span>مستبعدة / غير صالحة</span><strong style={{ color: "#fca5a5" }}>{importReport.invalid?.length || 0}</strong></article>
             </div>
