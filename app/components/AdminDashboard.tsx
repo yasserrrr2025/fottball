@@ -9,6 +9,7 @@ import {
   Eye, 
   FileSpreadsheet, 
   FileText,
+  Files,
   Link2, 
   LogOut, 
   MessageCircle, 
@@ -62,6 +63,44 @@ const labels: Record<string, string> = {
   rejected: "مرفوض" 
 };
 
+// دالة تحويل ملفات الـ PDF ديناميكياً إلى صور عالية الدقة (200% Scale PNG) لضمان طباعتها على كافة الطابعات
+async function renderPdfToDataUrl(pdfUrl: string): Promise<string> {
+  try {
+    if (typeof window === "undefined") return "";
+    if (!(window as any).pdfjsLib) {
+      await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+        script.onload = () => {
+          (window as any).pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+          resolve(true);
+        };
+        script.onerror = reject;
+        document.head.appendChild(script);
+      });
+    }
+
+    const pdfjsLib = (window as any).pdfjsLib;
+    const loadingTask = pdfjsLib.getDocument(pdfUrl);
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(1);
+
+    const viewport = page.getViewport({ scale: 2.0 }); // دقة مضاعفة لضمان وضوح الأرقام والآيبان
+    const canvas = document.createElement("canvas");
+    const context = canvas.getContext("2d");
+    if (!context) return "";
+
+    canvas.height = viewport.height;
+    canvas.width = viewport.width;
+
+    await page.render({ canvasContext: context, viewport }).promise;
+    return canvas.toDataURL("image/png");
+  } catch (err) {
+    console.error("Error rendering PDF page to image:", err);
+    return "";
+  }
+}
+
 export default function AdminDashboard() {
   const supabase = useMemo(() => createBrowserSupabase(), []);
   const [session, setSession] = useState<any>(null);
@@ -80,11 +119,13 @@ export default function AdminDashboard() {
   const [busy, setBusy] = useState(false);
   const [details, setDetails] = useState<any>(null);
 
-  // إدارة التحديد والتعديل والتقرير والطباعة الرسمية
+  // إدارة التحديد والتعديل والتقارير الرسمية
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [editStudent, setEditStudent] = useState<{ id: string; fullName: string; nationalId: string } | null>(null);
   const [importReport, setImportReport] = useState<any>(null);
   const [activeReport, setActiveReport] = useState<"summary" | "detailed" | null>(null);
+  const [attachmentModal, setAttachmentModal] = useState<{ submission: Submission; url: string; isPdf?: boolean } | null>(null);
+  const [allAttachmentsModal, setAllAttachmentsModal] = useState<{ submission: Submission; url: string; isPdf?: boolean }[] | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -245,10 +286,83 @@ export default function AdminDashboard() {
     loadData();
   }
 
-  async function openAttachment(id: string) {
-    const res = await fetch(`/api/admin/attachment/${id}`, { headers: await authHeader() });
-    const j = await res.json();
-    if (j.url) window.open(j.url, "_blank");
+  async function openAttachmentModal(submission: Submission) {
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/admin/attachment/${submission.id}`, { headers: await authHeader() });
+      const j = await res.json();
+      if (!res.ok || !j.url) return alert(j.message || "تعذر فتح المرفق");
+      
+      let displayUrl = j.url;
+      const isPdf = j.isPdf || j.url.toLowerCase().includes(".pdf");
+
+      if (isPdf) {
+        const pdfImage = await renderPdfToDataUrl(j.url);
+        if (pdfImage) displayUrl = pdfImage;
+      } else {
+        await new Promise((resolve) => {
+          const img = new Image();
+          img.src = j.url;
+          img.onload = () => resolve(true);
+          img.onerror = () => resolve(false);
+        });
+      }
+
+      setAttachmentModal({ submission, url: displayUrl, isPdf: Boolean(isPdf) });
+    } catch (_e) {
+      alert("حدث خطأ أثناء فتح المرفق");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function openAllAttachmentsModal() {
+    setBusy(true);
+    try {
+      const validSubmissions = submissions.filter(s => s.students?.full_name);
+      if (validSubmissions.length === 0) return alert("لا توجد طلبات مرفوعة مع مرفقات للطباعة.");
+
+      const rawItems = await Promise.all(
+        validSubmissions.map(async (sub) => {
+          try {
+            const res = await fetch(`/api/admin/attachment/${sub.id}`, { headers: await authHeader() });
+            const j = await res.json();
+            const isPdf = j.isPdf || (j.url && j.url.toLowerCase().includes(".pdf"));
+            return { submission: sub, rawUrl: j.url || "", isPdf: Boolean(isPdf) };
+          } catch (_e) {
+            return { submission: sub, rawUrl: "", isPdf: false };
+          }
+        })
+      );
+
+      const readyItems = rawItems.filter(item => item.rawUrl !== "");
+      if (readyItems.length === 0) return alert("لم يتم العثور على أي مرفقات بنكية صالحة.");
+
+      // تحويل كافة ملفات الـ PDF لصور عالية الدقة 200%، والتحميل المسبق لكافة الصور العادية
+      const processedList = await Promise.all(
+        readyItems.map(async (item) => {
+          let finalUrl = item.rawUrl;
+          if (item.isPdf) {
+            const pdfImage = await renderPdfToDataUrl(item.rawUrl);
+            if (pdfImage) finalUrl = pdfImage;
+          } else {
+            await new Promise((resolve) => {
+              const img = new Image();
+              img.src = item.rawUrl;
+              img.onload = () => resolve(true);
+              img.onerror = () => resolve(false);
+            });
+          }
+          return { submission: item.submission, url: finalUrl, isPdf: item.isPdf };
+        })
+      );
+
+      setAllAttachmentsModal(processedList);
+    } catch (_e) {
+      alert("حدث خطأ أثناء معالجة المرفقات والـ PDF للطباعة.");
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function openDetails(id: string) {
@@ -360,6 +474,9 @@ export default function AdminDashboard() {
               </button>
               <button className="secondary-button" onClick={() => setActiveReport("detailed")}>
                 <FileText size={16} /> التقرير التفصيلي للطلاب
+              </button>
+              <button className="secondary-button" onClick={openAllAttachmentsModal}>
+                <Files size={16} /> طباعة كافة المرفقات
               </button>
               <button className="secondary-button" onClick={() => exportFile("approved")}><Download />تصدير المعتمدين</button>
               <button className="icon-button" onClick={loadData}><RefreshCw className={busy ? "spin" : ""} /></button>
@@ -527,7 +644,7 @@ export default function AdminDashboard() {
                       <td>
                         <div className="row-actions">
                           <button title="التفاصيل" onClick={() => openDetails(s.id)}><Eye /></button>
-                          <button title="المرفق" onClick={() => openAttachment(s.id)}><FileSpreadsheet /></button>
+                          <button title="معاينة وتوثيق المرفق للطباعة" onClick={() => openAttachmentModal(s)}><FileSpreadsheet /></button>
                           <button title="إشعار واتساب" onClick={() => notify(s)}><MessageCircle /></button>
                           {s.status === "pending_review" && (
                             <>
@@ -553,7 +670,283 @@ export default function AdminDashboard() {
         </section>
       </main>
 
-      {/* نافذة التقرير الرسمية القابلة للطباعة (خارج الماين الرئيسي لمنع إخفائها بالكامل أثناء الطباعة) */}
+      {/* نافذة طباعة وتوثيق كافة مرفقات الطلاب دفعة واحدة */}
+      {allAttachmentsModal && (
+        <div className="official-report-modal">
+          <div className="print-toolbar no-print" style={{ width: "100%", maxWidth: "210mm" }}>
+            <button className="secondary-button" onClick={() => setAllAttachmentsModal(null)}>
+              <X size={16} /> إغلاق المعاينة
+            </button>
+            <div style={{ color: "#ffffff", fontSize: 14, fontWeight: 700 }}>
+              عرض {allAttachmentsModal.length} وثيقة مرفقة صالحة للطباعة
+            </div>
+            <button className="primary-button" onClick={() => window.print()}>
+              <Printer size={18} /> طباعة كافة المرفقات ({allAttachmentsModal.length} صفحة)
+            </button>
+          </div>
+
+          {allAttachmentsModal.map((item, idx) => {
+            const isLast = idx === allAttachmentsModal.length - 1;
+            const ibanVal = (() => {
+              let val = item.submission.student_iban || item.submission.guardian_iban || "";
+              val = val.trim().toUpperCase();
+              return val.startsWith("SA") ? val : `SA${val}`;
+            })();
+
+            return (
+              <div 
+                key={item.submission.id} 
+                className="official-report-container attachment-page-sheet"
+                style={{ 
+                  marginBottom: isLast ? 30 : 40,
+                  pageBreakAfter: isLast ? "avoid" : "always",
+                  breakAfter: isLast ? "auto" : "page"
+                }}
+              >
+                {/* الكليشة والترويسة الرسمية لوزارة التعليم */}
+                <header className="official-header">
+                  <div className="official-header-right">
+                    <h3>المملكة العربية السعودية</h3>
+                    <div>وزارة التعليم</div>
+                    <div>الإدارة العامة للتعليم بمحافظة جدة</div>
+                    <div>مدرسة عماد الدين زنكي المتوسطة</div>
+                  </div>
+                  <div className="official-header-center">
+                    <div className="official-logo-emblem">
+                      <img src="/images/moe-logo.png" alt="شعار وزارة التعليم السعودية" />
+                    </div>
+                  </div>
+                  <div className="official-header-left">
+                    <div>الرقم: ........................ / م ز</div>
+                    <div>التاريخ: {currentDateHijri} هـ</div>
+                    <div>الموافق: {currentDateGregorian} م</div>
+                    <div>المرفقات: وثيقة رقم ({idx + 1} من {allAttachmentsModal.length})</div>
+                  </div>
+                </header>
+
+                <div className="report-title-block" style={{ padding: "8px 12px", margin: "8px 0 12px" }}>
+                  <h2 style={{ fontSize: 18 }}>وثيقة المرفق البنكي الخاصة بالطالب ({idx + 1} من {allAttachmentsModal.length})</h2>
+                  <p style={{ fontSize: 11, margin: "2px 0 0" }}>أبطال دوري المدارس U13 لعام 2026 — مدرسة عماد الدين زنكي المتوسطة</p>
+                </div>
+
+                {/* جدول معلومات الطالب والحساب البنكي */}
+                <table className="official-table" style={{ marginBottom: 12 }}>
+                  <tbody>
+                    <tr>
+                      <td style={{ width: "20%", background: "#f8fafc", fontWeight: 700 }}>اسم الطالب الرباعي:</td>
+                      <td style={{ width: "30%", fontWeight: 800, color: "#1e3a8a" }}>{item.submission.students?.full_name}</td>
+                      <td style={{ width: "20%", background: "#f8fafc", fontWeight: 700 }}>رقم الهوية / الإقامة:</td>
+                      <td dir="ltr" style={{ width: "30%", fontFamily: "monospace", fontWeight: 700 }}>{item.submission.students?.national_id}</td>
+                    </tr>
+                    <tr>
+                      <td style={{ background: "#f8fafc", fontWeight: 700 }}>صاحب الحساب:</td>
+                      <td>{item.submission.has_student_bank_account ? "الطالب نفسه" : `ولي الأمر: ${item.submission.guardian_name}`}</td>
+                      <td style={{ background: "#f8fafc", fontWeight: 700 }}>اسم البنك:</td>
+                      <td><strong>{item.submission.bank_name}</strong></td>
+                    </tr>
+                    <tr>
+                      <td style={{ background: "#f8fafc", fontWeight: 700 }}>رقم الآيبان (IBAN):</td>
+                      <td colSpan={3} dir="ltr" style={{ fontFamily: "'Courier New', Courier, monospace", fontWeight: 800, fontSize: 12, color: "#0f172a" }}>
+                        {ibanVal}
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+
+                {/* منطقة معاينة صورة المرفق البنكي عالية الدقة والوضوح */}
+                <div style={{ textAlign: "center", margin: "8px 0 12px", padding: 10, border: "1px solid #cbd5e1", borderRadius: 8, background: "#ffffff" }}>
+                  <h4 style={{ margin: "0 0 6px", fontSize: 11, color: "#475569" }}>صورة مستند الحساب البنكي / الإثبات المرفق (دقة عالية):</h4>
+                  <img 
+                    src={item.url} 
+                    alt={`مستند آيبان ${item.submission.students?.full_name}`}
+                    style={{ 
+                      maxWidth: "100%", 
+                      maxHeight: "460px", 
+                      objectFit: "contain", 
+                      borderRadius: 6, 
+                      border: "1px solid #94a3b8", 
+                      boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+                      background: "#ffffff"
+                    }} 
+                    onError={(e) => {
+                      const target = e.currentTarget;
+                      target.style.display = "none";
+                      const parent = target.parentElement;
+                      if (parent && !parent.querySelector(".img-fallback")) {
+                        const fallback = document.createElement("div");
+                        fallback.className = "img-fallback";
+                        fallback.innerHTML = `
+                          <div style="padding: 16px; background: #eff6ff; border: 1px dashed #3b82f6; border-radius: 6px; color: #1e3a8a; font-weight: 700; font-size: 13px;">
+                            📄 مستند الإثبات البنكي المرفوع للطلب:
+                            <br/>
+                            <a href="${item.url}" target="_blank" style="color: #2563eb; text-decoration: underline; font-size: 12px; display: inline-block; margin-top: 6px;">
+                              🔗 اضغط هنا لفتح وتصفح ملف المرفق الأصلي المرفوع بالطالب مباشرة
+                            </a>
+                          </div>
+                        `;
+                        parent.appendChild(fallback);
+                      }
+                    }}
+                  />
+                </div>
+
+                {/* التوقيعات والاعتماد الرسمي */}
+                <footer className="official-signatures" style={{ marginTop: 14, paddingTop: 12 }}>
+                  <div className="signature-col">
+                    <strong>معلم التربية البدنية / مدرب الفريق</strong>
+                    <p>موسى مهدي الفاهمي</p>
+                    <div className="signature-space" style={{ height: 35 }}></div>
+                    <p>التوقيع: ................................</p>
+                  </div>
+                  <div className="signature-col">
+                    <strong>موثق البيانات / مساعد إداري</strong>
+                    <p>ياسر محفوظ الحميدي</p>
+                    <div className="signature-space" style={{ height: 35 }}></div>
+                    <p>التوقيع: ................................</p>
+                  </div>
+                  <div className="signature-col">
+                    <strong>يعتمد / مدير مدرسة عماد الدين زنكي المتوسطة</strong>
+                    <p>عابد عبيد الجدعاني</p>
+                    <div className="signature-space" style={{ height: 35 }}></div>
+                    <p>الختم والتوقيع: ................................</p>
+                  </div>
+                </footer>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {/* نافذة توثيق وطباعة مرفق آيبان طالب مفرد */}
+      {attachmentModal && (
+        <div className="official-report-modal">
+          <div className="official-report-container">
+            <div className="print-toolbar no-print">
+              <button className="secondary-button" onClick={() => setAttachmentModal(null)}>
+                <X size={16} /> إغلاق المعاينة
+              </button>
+              <button className="primary-button" onClick={() => window.print()}>
+                <Printer size={18} /> طباعة وثيقة المرفق (Print)
+              </button>
+            </div>
+
+            {/* الكليشة والترويسة الرسمية لوزارة التعليم */}
+            <header className="official-header">
+              <div className="official-header-right">
+                <h3>المملكة العربية السعودية</h3>
+                <div>وزارة التعليم</div>
+                <div>الإدارة العامة للتعليم بمحافظة جدة</div>
+                <div>مدرسة عماد الدين زنكي المتوسطة</div>
+              </div>
+              <div className="official-header-center">
+                <div className="official-logo-emblem">
+                  <img src="/images/moe-logo.png" alt="شعار وزارة التعليم السعودية" />
+                </div>
+              </div>
+              <div className="official-header-left">
+                <div>الرقم: ........................ / م ز</div>
+                <div>التاريخ: {currentDateHijri} هـ</div>
+                <div>الموافق: {currentDateGregorian} م</div>
+                <div>المرفقات: مستند بنكي رسمي</div>
+              </div>
+            </header>
+
+            <div className="report-title-block" style={{ padding: "8px 12px", margin: "8px 0 12px" }}>
+              <h2 style={{ fontSize: 18 }}>وثيقة المرفق البنكي الخاصة بالطالب</h2>
+              <p style={{ fontSize: 11, margin: "2px 0 0" }}>أبطال دوري المدارس U13 لعام 2026 — مدرسة عماد الدين زنكي المتوسطة</p>
+            </div>
+
+            {/* جدول معلومات الطالب والحساب البنكي */}
+            <table className="official-table" style={{ marginBottom: 14 }}>
+              <tbody>
+                <tr>
+                  <td style={{ width: "20%", background: "#f8fafc", fontWeight: 700 }}>اسم الطالب الرباعي:</td>
+                  <td style={{ width: "30%", fontWeight: 800, color: "#1e3a8a" }}>{attachmentModal.submission.students?.full_name}</td>
+                  <td style={{ width: "20%", background: "#f8fafc", fontWeight: 700 }}>رقم الهوية / الإقامة:</td>
+                  <td dir="ltr" style={{ width: "30%", fontFamily: "monospace", fontWeight: 700 }}>{attachmentModal.submission.students?.national_id}</td>
+                </tr>
+                <tr>
+                  <td style={{ background: "#f8fafc", fontWeight: 700 }}>صاحب الحساب:</td>
+                  <td>{attachmentModal.submission.has_student_bank_account ? "الطالب نفسه" : `ولي الأمر: ${attachmentModal.submission.guardian_name}`}</td>
+                  <td style={{ background: "#f8fafc", fontWeight: 700 }}>اسم البنك:</td>
+                  <td><strong>{attachmentModal.submission.bank_name}</strong></td>
+                </tr>
+                <tr>
+                  <td style={{ background: "#f8fafc", fontWeight: 700 }}>رقم الآيبان (IBAN):</td>
+                  <td colSpan={3} dir="ltr" style={{ fontFamily: "'Courier New', Courier, monospace", fontWeight: 800, fontSize: 12, color: "#0f172a" }}>
+                    {(() => {
+                      let ibanVal = attachmentModal.submission.student_iban || attachmentModal.submission.guardian_iban || "";
+                      ibanVal = ibanVal.trim().toUpperCase();
+                      return ibanVal.startsWith("SA") ? ibanVal : `SA${ibanVal}`;
+                    })()}
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+
+            {/* منطقة معاينة صورة المرفق البنكي عالية الدقة والوضوح */}
+            <div style={{ textAlign: "center", margin: "10px 0 16px", padding: 12, border: "1px solid #cbd5e1", borderRadius: 8, background: "#ffffff" }}>
+              <h4 style={{ margin: "0 0 8px", fontSize: 12, color: "#475569" }}>صورة مستند الحساب البنكي / الإثبات المرفق:</h4>
+              <img 
+                src={attachmentModal.url} 
+                alt="مستند الآيبان المرفق" 
+                style={{ 
+                  maxWidth: "100%", 
+                  maxHeight: "460px", 
+                  objectFit: "contain", 
+                  borderRadius: 6, 
+                  border: "1px solid #94a3b8", 
+                  boxShadow: "0 4px 12px rgba(0,0,0,0.08)",
+                  background: "#ffffff"
+                }} 
+                onError={(e) => {
+                  const target = e.currentTarget;
+                  target.style.display = "none";
+                  const parent = target.parentElement;
+                  if (parent && !parent.querySelector(".img-fallback")) {
+                    const fallback = document.createElement("div");
+                    fallback.className = "img-fallback";
+                    fallback.innerHTML = `
+                      <div style="padding: 16px; background: #eff6ff; border: 1px dashed #3b82f6; border-radius: 6px; color: #1e3a8a; font-weight: 700; font-size: 13px;">
+                        📄 مستند الإثبات البنكي المرفوع للطلب:
+                        <br/>
+                        <a href="${attachmentModal.url}" target="_blank" style="color: #2563eb; text-decoration: underline; font-size: 12px; display: inline-block; margin-top: 6px;">
+                          🔗 اضغط هنا لفتح وتصفح ملف المرفق الأصلي المرفوع بالطالب مباشرة
+                        </a>
+                      </div>
+                    `;
+                    parent.appendChild(fallback);
+                  }
+                }}
+              />
+            </div>
+
+            {/* التوقيعات والاعتماد الرسمي */}
+            <footer className="official-signatures" style={{ marginTop: 16, paddingTop: 14 }}>
+              <div className="signature-col">
+                <strong>معلم التربية البدنية / مدرب الفريق</strong>
+                <p>موسى مهدي الفاهمي</p>
+                <div className="signature-space" style={{ height: 35 }}></div>
+                <p>التوقيع: ................................</p>
+              </div>
+              <div className="signature-col">
+                <strong>موثق البيانات / مساعد إداري</strong>
+                <p>ياسر محفوظ الحميدي</p>
+                <div className="signature-space" style={{ height: 35 }}></div>
+                <p>التوقيع: ................................</p>
+              </div>
+              <div className="signature-col">
+                <strong>يعتمد / مدير مدرسة عماد الدين زنكي المتوسطة</strong>
+                <p>عابد عبيد الجدعاني</p>
+                <div className="signature-space" style={{ height: 35 }}></div>
+                <p>الختم والتوقيع: ................................</p>
+              </div>
+            </footer>
+          </div>
+        </div>
+      )}
+
+      {/* نافذة التقرير الرسمية القابلة للطباعة */}
       {activeReport && (
         <div className="official-report-modal">
           <div className="official-report-container">
@@ -575,7 +968,6 @@ export default function AdminDashboard() {
                 <div>مدرسة عماد الدين زنكي المتوسطة</div>
               </div>
               <div className="official-header-center">
-                {/* شعار وزارة التعليم السعودية الرسمية */}
                 <div className="official-logo-emblem">
                   <img src="/images/moe-logo.png" alt="شعار وزارة التعليم السعودية" />
                 </div>
@@ -899,7 +1291,7 @@ export default function AdminDashboard() {
               <div className="detail-box"><small>الإقرار</small><strong>{details.submission.consent_accepted ? "موافق" : "غير مسجل"}</strong></div>
             </div>
             <div className="admin-actions-bar" style={{ marginTop: 18 }}>
-              <button className="secondary-button" onClick={() => openAttachment(details.submission.id)}><Eye />فتح المرفق</button>
+              <button className="secondary-button" onClick={() => openAttachmentModal(details.submission)}><Eye />معاينة وتوثيق المرفق للطباعة</button>
               {details.submission.status === "pending_review" && (
                 <button className="primary-button" onClick={() => action(details.submission.id, "approve_next")}><Check />اعتماد والانتقال للتالي</button>
               )}

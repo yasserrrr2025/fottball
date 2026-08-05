@@ -1668,6 +1668,16 @@ td small {
   .official-signatures {
     page-break-inside: avoid;
   }
+
+  .attachment-page-sheet {
+    page-break-after: always !important;
+    break-after: page !important;
+  }
+
+  .attachment-page-sheet:last-child {
+    page-break-after: avoid !important;
+    break-after: auto !important;
+  }
 }
 
 
