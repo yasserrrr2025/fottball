@@ -8,10 +8,12 @@ import {
   Edit, 
   Eye, 
   FileSpreadsheet, 
+  FileText,
   Link2, 
   LogOut, 
   MessageCircle, 
   Plus, 
+  Printer,
   RefreshCw, 
   RotateCcw, 
   Search, 
@@ -25,6 +27,7 @@ import {
 type Submission = { 
   id: string; 
   status: string; 
+  student_id?: string;
   has_student_bank_account: boolean; 
   student_iban: string | null; 
   guardian_name: string | null; 
@@ -44,7 +47,12 @@ type Student = {
   full_name: string; 
   national_id: string; 
   is_active: boolean; 
-  submissions: { status: string }[] 
+  submissions: { 
+    status: string;
+    has_student_bank_account?: boolean;
+    bank_name?: string;
+    guardian_name?: string;
+  }[] 
 };
 
 const labels: Record<string, string> = { 
@@ -72,10 +80,11 @@ export default function AdminDashboard() {
   const [busy, setBusy] = useState(false);
   const [details, setDetails] = useState<any>(null);
 
-  // إدارة التحديد والتعديل والتقرير للطلاب
+  // إدارة التحديد والتعديل والتقرير والطباعة الرسمية
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [editStudent, setEditStudent] = useState<{ id: string; fullName: string; nationalId: string } | null>(null);
   const [importReport, setImportReport] = useState<any>(null);
+  const [activeReport, setActiveReport] = useState<"summary" | "detailed" | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => setSession(data.session));
@@ -103,12 +112,37 @@ export default function AdminDashboard() {
     setBusy(true);
     const [s, r] = await Promise.all([
       supabase.from("students").select("id,full_name,national_id,is_active,submissions(status)").order("created_at", { ascending: false }),
-      supabase.from("submissions").select("id,status,has_student_bank_account,student_iban,guardian_name,guardian_phone,guardian_iban,bank_name,iban_match_status,extracted_iban,return_reason,submitted_at,consent_accepted,students(full_name,national_id)").order("submitted_at", { ascending: false })
+      supabase.from("submissions").select("id,status,student_id,has_student_bank_account,student_iban,guardian_name,guardian_phone,guardian_iban,bank_name,iban_match_status,extracted_iban,return_reason,submitted_at,consent_accepted,students(full_name,national_id)").order("submitted_at", { ascending: false })
     ]);
     if (s.error || r.error) setError("تأكد من تشغيل ملف الترقية وإضافة حسابك في admin_users.");
     setStudents((s.data as any) || []);
     setSubmissions((r.data as any) || []);
     setBusy(false);
+  }
+
+  // دالة ذكية لمطابقة حالة الطالب الفعلية لمنع ثبات الحالة على "لم يعبئ"
+  function getStudentSubmission(student: Student): Submission | null {
+    const subFromList = submissions.find(sub => 
+      sub.student_id === student.id || 
+      sub.students?.national_id === student.national_id
+    );
+    if (subFromList) return subFromList;
+
+    const subFromRel = student.submissions?.[0];
+    if (subFromRel) return subFromRel as any;
+
+    return null;
+  }
+
+  function getStudentStatusLabel(student: Student) {
+    const sub = getStudentSubmission(student);
+    if (!sub || !sub.status) return "لم يعبئ";
+    return labels[sub.status] || sub.status;
+  }
+
+  function getStudentStatusRaw(student: Student) {
+    const sub = getStudentSubmission(student);
+    return sub?.status || "not_submitted";
   }
 
   async function addStudent(e: React.FormEvent) {
@@ -271,11 +305,14 @@ export default function AdminDashboard() {
     </main>
   );
 
+  // إحصائيات الطلاب والمستندات
+  const submittedStudentIds = new Set(submissions.map(sub => sub.students?.national_id));
   const counts = {
     total: students.length,
+    approved: submissions.filter(s => s.status === "approved").length,
     pending: submissions.filter(s => s.status === "pending_review").length,
     returned: submissions.filter(s => s.status === "returned_for_correction").length,
-    approved: submissions.filter(s => s.status === "approved").length
+    notSubmitted: students.filter(s => !submittedStudentIds.has(s.national_id)).length,
   };
   const pct = Math.min(100, Math.round((counts.approved / 20) * 100));
 
@@ -296,206 +333,466 @@ export default function AdminDashboard() {
     setSelectedIds(prev => prev.includes(id) ? prev.filter(i => i !== id) : [...prev, id]);
   }
 
+  const currentDateHijri = new Date().toLocaleDateString("ar-SA-u-ca-islamic", { year: "numeric", month: "long", day: "numeric" });
+  const currentDateGregorian = new Date().toLocaleDateString("ar-SA", { year: "numeric", month: "long", day: "numeric" });
+
   return (
-    <main className="admin-shell">
-      <aside className="sidebar">
-        <div>
-          <div className="sidebar-brand"><span>⚽</span><strong>إدارة الفريق</strong></div>
-          <button className={tab === "requests" ? "nav active" : "nav"} onClick={() => setTab("requests")}><ShieldCheck />المراجعة والاعتماد</button>
-          <button className={tab === "students" ? "nav active" : "nav"} onClick={() => setTab("students")}><UserPlus />قائمة الطلاب</button>
-        </div>
-        <button className="nav" onClick={() => supabase.auth.signOut()}><LogOut />تسجيل الخروج</button>
-      </aside>
-
-      <section className="admin-content">
-        <header className="admin-header">
+    <>
+      <main className="admin-shell">
+        <aside className="sidebar">
           <div>
-            <p>مدرسة عماد الدين زنكي المتوسطة</p>
-            <h1>{tab === "requests" ? "مركز مراجعة اللاعبين" : "إدارة قائمة الطلاب"}</h1>
+            <div className="sidebar-brand"><span>⚽</span><strong>إدارة الفريق</strong></div>
+            <button className={tab === "requests" ? "nav active" : "nav"} onClick={() => setTab("requests")}><ShieldCheck />المراجعة والاعتماد</button>
+            <button className={tab === "students" ? "nav active" : "nav"} onClick={() => setTab("students")}><UserPlus />قائمة الطلاب</button>
           </div>
-          <div className="admin-actions-bar">
-            <button className="secondary-button" onClick={() => exportFile("approved")}><Download />تصدير المعتمدين</button>
-            <button className="icon-button" onClick={loadData}><RefreshCw className={busy ? "spin" : ""} /></button>
-          </div>
-        </header>
-        {error && <div className="alert error">{error}</div>}
+          <button className="nav" onClick={() => supabase.auth.signOut()}><LogOut />تسجيل الخروج</button>
+        </aside>
 
-        <div className="stats">
-          <article><span>إجمالي الطلاب</span><strong>{counts.total}</strong></article>
-          <article><span>بانتظار المراجعة</span><strong>{counts.pending}</strong></article>
-          <article><span>معاد للتصحيح</span><strong>{counts.returned}</strong></article>
-          <article><span>معتمد</span><strong>{counts.approved}</strong></article>
-        </div>
-
-        <div className="progress-card">
-          <strong>اكتمل اعتماد {counts.approved} من 20 لاعبًا — {pct}%</strong>
-          <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
-        </div>
-
-        <div className="toolbar">
-          <div className="search-box">
-            <Search />
-            <input placeholder="بحث بالاسم أو الهوية" value={search} onChange={e => setSearch(e.target.value)} />
-          </div>
-          {tab === "requests" && (
-            <select value={filter} onChange={e => setFilter(e.target.value)}>
-              <option value="all">جميع الحالات</option>
-              <option value="pending_review">بانتظار المراجعة</option>
-              <option value="returned_for_correction">معاد للتصحيح</option>
-              <option value="approved">معتمد</option>
-              <option value="rejected">مرفوض</option>
-            </select>
-          )}
-          {tab === "students" && (
+        <section className="admin-content">
+          <header className="admin-header">
+            <div>
+              <p>مدرسة عماد الدين زنكي المتوسطة</p>
+              <h1>{tab === "requests" ? "مركز مراجعة اللاعبين" : "إدارة قائمة الطلاب"}</h1>
+            </div>
             <div className="admin-actions-bar">
-              {selectedIds.length > 0 && (
-                <button className="secondary-button danger-btn" onClick={deleteBatchStudents}>
-                  <Trash2 size={16} /> حذف المحدد ({selectedIds.length})
-                </button>
-              )}
-              {students.length > 0 && (
-                <button className="secondary-button danger-btn" onClick={deleteAllStudents}>
-                  <Trash2 size={16} /> مسح كافة الطلاب
-                </button>
-              )}
+              <button className="secondary-button" onClick={() => setActiveReport("summary")}>
+                <Printer size={16} /> تقرير الإحصاء (أكملوا / لم يكملوا)
+              </button>
+              <button className="secondary-button" onClick={() => setActiveReport("detailed")}>
+                <FileText size={16} /> التقرير التفصيلي للطلاب
+              </button>
+              <button className="secondary-button" onClick={() => exportFile("approved")}><Download />تصدير المعتمدين</button>
+              <button className="icon-button" onClick={loadData}><RefreshCw className={busy ? "spin" : ""} /></button>
             </div>
-          )}
-        </div>
+          </header>
+          {error && <div className="alert error">{error}</div>}
 
-        {tab === "students" ? (
-          <>
-            <div className="admin-grid">
-              <form className="panel" onSubmit={addStudent}>
-                <h2><Plus />إضافة طالب يدويًا</h2>
-                <label>اسم الطالب رباعيًا</label>
-                <input value={fullName} onChange={e => setFullName(e.target.value)} required />
-                <label>رقم الهوية أو الإقامة</label>
-                <input inputMode="numeric" maxLength={10} value={nationalId} onChange={e => setNationalId(e.target.value.replace(/\D/g, ""))} required />
-                <button className="primary-button"><UserPlus />إضافة الطالب</button>
-              </form>
-              <div className="panel">
-                <h2><FileSpreadsheet />استيراد من Excel</h2>
-                <p>الملف يحتوي على اسم الطالب ورقم الهوية، مع معاينة الأخطاء والتكرار قبل الحفظ.</p>
-                <label className="upload-zone small">
-                  <input type="file" accept=".xlsx,.xls" onChange={e => e.target.files?.[0] && importExcel(e.target.files[0])} />
-                  <Upload />
-                  <strong>اختر ملف Excel</strong>
-                </label>
+          <div className="stats">
+            <article><span>إجمالي الطلاب</span><strong>{counts.total}</strong></article>
+            <article><span>بانتظار المراجعة</span><strong>{counts.pending}</strong></article>
+            <article><span>معاد للتصحيح</span><strong>{counts.returned}</strong></article>
+            <article><span>معتمد</span><strong>{counts.approved}</strong></article>
+          </div>
+
+          <div className="progress-card">
+            <strong>اكتمل اعتماد {counts.approved} من 20 لاعبًا — {pct}%</strong>
+            <div className="progress-track"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
+          </div>
+
+          <div className="toolbar">
+            <div className="search-box">
+              <Search />
+              <input placeholder="بحث بالاسم أو الهوية" value={search} onChange={e => setSearch(e.target.value)} />
+            </div>
+            {tab === "requests" && (
+              <select value={filter} onChange={e => setFilter(e.target.value)}>
+                <option value="all">جميع الحالات</option>
+                <option value="pending_review">بانتظار المراجعة</option>
+                <option value="returned_for_correction">معاد للتصحيح</option>
+                <option value="approved">معتمد</option>
+                <option value="rejected">مرفوض</option>
+              </select>
+            )}
+            {tab === "students" && (
+              <div className="admin-actions-bar">
+                {selectedIds.length > 0 && (
+                  <button className="secondary-button danger-btn" onClick={deleteBatchStudents}>
+                    <Trash2 size={16} /> حذف المحدد ({selectedIds.length})
+                  </button>
+                )}
+                {students.length > 0 && (
+                  <button className="secondary-button danger-btn" onClick={deleteAllStudents}>
+                    <Trash2 size={16} /> مسح كافة الطلاب
+                  </button>
+                )}
               </div>
-            </div>
+            )}
+          </div>
 
+          {tab === "students" ? (
+            <>
+              <div className="admin-grid">
+                <form className="panel" onSubmit={addStudent}>
+                  <h2><Plus />إضافة طالب يدويًا</h2>
+                  <label>اسم الطالب رباعيًا</label>
+                  <input value={fullName} onChange={e => setFullName(e.target.value)} required />
+                  <label>رقم الهوية أو الإقامة</label>
+                  <input inputMode="numeric" maxLength={10} value={nationalId} onChange={e => setNationalId(e.target.value.replace(/\D/g, ""))} required />
+                  <button className="primary-button"><UserPlus />إضافة الطالب</button>
+                </form>
+                <div className="panel">
+                  <h2><FileSpreadsheet />استيراد من Excel</h2>
+                  <p>الملف يحتوي على اسم الطالب ورقم الهوية، مع معاينة الأخطاء والتكرار قبل الحفظ.</p>
+                  <label className="upload-zone small">
+                    <input type="file" accept=".xlsx,.xls" onChange={e => e.target.files?.[0] && importExcel(e.target.files[0])} />
+                    <Upload />
+                    <strong>اختر ملف Excel</strong>
+                  </label>
+                </div>
+              </div>
+
+              <div className="table-card">
+                <table>
+                  <thead>
+                    <tr>
+                      <th style={{ width: 40, textAlign: "center" }}>
+                        <input 
+                          type="checkbox" 
+                          checked={allVisibleSelected} 
+                          onChange={toggleSelectAll} 
+                        />
+                      </th>
+                      <th>اسم الطالب</th>
+                      <th>رقم الهوية</th>
+                      <th>حالة التسجيل</th>
+                      <th style={{ textAlign: "center" }}>الإجراءات</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleStudents.map(s => {
+                      const statusText = getStudentStatusLabel(s);
+                      const statusRaw = getStudentStatusRaw(s);
+                      return (
+                        <tr key={s.id}>
+                          <td style={{ textAlign: "center" }}>
+                            <input 
+                              type="checkbox" 
+                              checked={selectedIds.includes(s.id)} 
+                              onChange={() => toggleSelect(s.id)} 
+                            />
+                          </td>
+                          <td><strong>{s.full_name}</strong></td>
+                          <td dir="ltr">{s.national_id}</td>
+                          <td>
+                            <span className={`status ${statusRaw}`}>
+                              {statusText}
+                            </span>
+                          </td>
+                          <td>
+                            <div className="row-actions" style={{ justifyContent: "center" }}>
+                              <button 
+                                title="تعديل الطالب" 
+                                onClick={() => setEditStudent({ id: s.id, fullName: s.full_name, nationalId: s.national_id })}
+                              >
+                                <Edit size={16} />
+                              </button>
+                              <button 
+                                className="reject" 
+                                title="حذف الطالب" 
+                                onClick={() => deleteSingleStudent(s.id, s.full_name)}
+                              >
+                                <Trash2 size={16} />
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {visibleStudents.length === 0 && (
+                      <tr>
+                        <td colSpan={5} style={{ textAlign: "center", padding: 24, color: "var(--muted)" }}>
+                          لا يوجد طلاب مضافون في القائمة.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          ) : (
             <div className="table-card">
               <table>
                 <thead>
                   <tr>
-                    <th style={{ width: 40, textAlign: "center" }}>
-                      <input 
-                        type="checkbox" 
-                        checked={allVisibleSelected} 
-                        onChange={toggleSelectAll} 
-                      />
-                    </th>
-                    <th>اسم الطالب</th>
-                    <th>رقم الهوية</th>
-                    <th>حالة التسجيل</th>
-                    <th style={{ textAlign: "center" }}>الإجراءات</th>
+                    <th>الطالب</th>
+                    <th>الحساب</th>
+                    <th>نتائج التحقق</th>
+                    <th>الحالة</th>
+                    <th>الإجراءات</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {visibleStudents.map(s => (
+                  {visible.map(s => (
                     <tr key={s.id}>
-                      <td style={{ textAlign: "center" }}>
-                        <input 
-                          type="checkbox" 
-                          checked={selectedIds.includes(s.id)} 
-                          onChange={() => toggleSelect(s.id)} 
-                        />
-                      </td>
-                      <td><strong>{s.full_name}</strong></td>
-                      <td dir="ltr">{s.national_id}</td>
-                      <td>{s.submissions?.[0]?.status ? labels[s.submissions[0].status] : "لم يعبئ"}</td>
+                      <td><strong>{s.students.full_name}</strong><small>{s.students.national_id}</small></td>
+                      <td>{s.has_student_bank_account ? "الطالب" : `ولي الأمر: ${s.guardian_name}`}</td>
                       <td>
-                        <div className="row-actions" style={{ justifyContent: "center" }}>
-                          <button 
-                            title="تعديل الطالب" 
-                            onClick={() => setEditStudent({ id: s.id, fullName: s.full_name, nationalId: s.national_id })}
-                          >
-                            <Edit size={16} />
-                          </button>
-                          <button 
-                            className="reject" 
-                            title="حذف الطالب" 
-                            onClick={() => deleteSingleStudent(s.id, s.full_name)}
-                          >
-                            <Trash2 size={16} />
-                          </button>
+                        <div className="review-flags">
+                          <span className={`flag ${s.iban_match_status === "matched" ? "good" : s.iban_match_status === "mismatched" ? "bad" : ""}`}>
+                            الصورة: {s.iban_match_status === "matched" ? "مطابق" : s.iban_match_status === "mismatched" ? "غير مطابق" : "يدوي"}
+                          </span>
+                        </div>
+                      </td>
+                      <td><span className={`status ${s.status}`}>{labels[s.status]}</span></td>
+                      <td>
+                        <div className="row-actions">
+                          <button title="التفاصيل" onClick={() => openDetails(s.id)}><Eye /></button>
+                          <button title="المرفق" onClick={() => openAttachment(s.id)}><FileSpreadsheet /></button>
+                          <button title="إشعار واتساب" onClick={() => notify(s)}><MessageCircle /></button>
+                          {s.status === "pending_review" && (
+                            <>
+                              <button className="approve" title="اعتماد" onClick={() => action(s.id, "approve")}><Check /></button>
+                              <button className="return" title="إعادة" onClick={() => action(s.id, "return")}><RotateCcw /></button>
+                              <button className="reject" title="رفض" onClick={() => action(s.id, "reject")}><X /></button>
+                            </>
+                          )}
+                          {s.status === "returned_for_correction" && (
+                            <button title="نسخ رابط تصحيح" onClick={() => correctionLink(s.id)}><Link2 /></button>
+                          )}
+                          {s.status === "approved" && (
+                            <button title="إعادة فتح" onClick={() => action(s.id, "reopen")}><RotateCcw /></button>
+                          )}
                         </div>
                       </td>
                     </tr>
                   ))}
-                  {visibleStudents.length === 0 && (
-                    <tr>
-                      <td colSpan={5} style={{ textAlign: "center", padding: 24, color: "var(--muted)" }}>
-                        لا يوجد طلاب مضافون في القائمة.
-                      </td>
-                    </tr>
-                  )}
                 </tbody>
               </table>
             </div>
-          </>
-        ) : (
-          <div className="table-card">
-            <table>
-              <thead>
-                <tr>
-                  <th>الطالب</th>
-                  <th>الحساب</th>
-                  <th>نتائج التحقق</th>
-                  <th>الحالة</th>
-                  <th>الإجراءات</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visible.map(s => (
-                  <tr key={s.id}>
-                    <td><strong>{s.students.full_name}</strong><small>{s.students.national_id}</small></td>
-                    <td>{s.has_student_bank_account ? "الطالب" : `ولي الأمر: ${s.guardian_name}`}</td>
-                    <td>
-                      <div className="review-flags">
-                        <span className={`flag ${s.iban_match_status === "matched" ? "good" : s.iban_match_status === "mismatched" ? "bad" : ""}`}>
-                          الصورة: {s.iban_match_status === "matched" ? "مطابق" : s.iban_match_status === "mismatched" ? "غير مطابق" : "يدوي"}
-                        </span>
-                      </div>
-                    </td>
-                    <td><span className={`status ${s.status}`}>{labels[s.status]}</span></td>
-                    <td>
-                      <div className="row-actions">
-                        <button title="التفاصيل" onClick={() => openDetails(s.id)}><Eye /></button>
-                        <button title="المرفق" onClick={() => openAttachment(s.id)}><FileSpreadsheet /></button>
-                        <button title="إشعار واتساب" onClick={() => notify(s)}><MessageCircle /></button>
-                        {s.status === "pending_review" && (
-                          <>
-                            <button className="approve" title="اعتماد" onClick={() => action(s.id, "approve")}><Check /></button>
-                            <button className="return" title="إعادة" onClick={() => action(s.id, "return")}><RotateCcw /></button>
-                            <button className="reject" title="رفض" onClick={() => action(s.id, "reject")}><X /></button>
-                          </>
-                        )}
-                        {s.status === "returned_for_correction" && (
-                          <button title="نسخ رابط تصحيح" onClick={() => correctionLink(s.id)}><Link2 /></button>
-                        )}
-                        {s.status === "approved" && (
-                          <button title="إعادة فتح" onClick={() => action(s.id, "reopen")}><RotateCcw /></button>
-                        )}
-                      </div>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+          )}
+        </section>
+      </main>
+
+      {/* نافذة التقرير الرسمية القابلة للطباعة (خارج الماين الرئيسي لمنع إخفائها بالكامل أثناء الطباعة) */}
+      {activeReport && (
+        <div className="official-report-modal">
+          <div className="official-report-container">
+            <div className="print-toolbar no-print">
+              <button className="secondary-button" onClick={() => setActiveReport(null)}>
+                <X size={16} /> إغلاق المعاينة
+              </button>
+              <button className="primary-button" onClick={() => window.print()}>
+                <Printer size={18} /> طباعة التقرير (Print)
+              </button>
+            </div>
+
+            {/* الكليشة والترويسة الرسمية لوزارة التعليم */}
+            <header className="official-header">
+              <div className="official-header-right">
+                <h3>المملكة العربية السعودية</h3>
+                <div>وزارة التعليم</div>
+                <div>الإدارة العامة للتعليم بمحافظة جدة</div>
+                <div>مدرسة عماد الدين زنكي المتوسطة</div>
+              </div>
+              <div className="official-header-center">
+                {/* شعار وزارة التعليم السعودية الرسمية */}
+                <div className="official-logo-emblem">
+                  <img src="/images/moe-logo.png" alt="شعار وزارة التعليم السعودية" />
+                </div>
+              </div>
+              <div className="official-header-left">
+                <div>الرقم: ........................ / م ز</div>
+                <div>التاريخ: {currentDateHijri} هـ</div>
+                <div>الموافق: {currentDateGregorian} م</div>
+                <div>المرفقات: ........................</div>
+              </div>
+            </header>
+
+            {/* عنوان التقرير الأول: تقرير بيان الحالة والإحصاء (أكملوا ولم يكملوا) */}
+            {activeReport === "summary" && (
+              <>
+                <div className="report-title-block" style={{ padding: "8px 12px", margin: "8px 0 12px" }}>
+                  <h2 style={{ fontSize: 18 }}>تقرير بيان حالة تسليم بيانات لاعبي فريق كرة القدم</h2>
+                  <p style={{ fontSize: 11, margin: "2px 0 0" }}>أبطال دوري المدارس U13 لعام 2026 — مدرسة عماد الدين زنكي المتوسطة</p>
+                </div>
+
+                <div className="report-summary-boxes" style={{ marginBottom: 12, gap: 8 }}>
+                  <div className="report-summary-box" style={{ padding: 8 }}>
+                    <span style={{ fontSize: 11 }}>إجمالي لاعبي الفريق</span>
+                    <strong style={{ fontSize: 16 }}>{counts.total}</strong>
+                  </div>
+                  <div className="report-summary-box" style={{ padding: 8 }}>
+                    <span style={{ fontSize: 11 }}>المكتملين (معتمد)</span>
+                    <strong style={{ fontSize: 16, color: "#15803d" }}>{counts.approved}</strong>
+                  </div>
+                  <div className="report-summary-box" style={{ padding: 8 }}>
+                    <span style={{ fontSize: 11 }}>قيد المراجعة والتصحيح</span>
+                    <strong style={{ fontSize: 16, color: "#b45309" }}>{counts.pending + counts.returned}</strong>
+                  </div>
+                  <div className="report-summary-box" style={{ padding: 8 }}>
+                    <span style={{ fontSize: 11 }}>لم يكملوا التسجيل بعد</span>
+                    <strong style={{ fontSize: 16, color: "#b91c1c" }}>{counts.notSubmitted}</strong>
+                  </div>
+                </div>
+
+                <h3 style={{ fontSize: 13, marginBottom: 8, color: "#1e3a8a" }}>جدول بيان حالة جميع طلاب الفريق:</h3>
+                
+                {/* جدولان متجاوران (10 صفوف بكل جدول) لضمان الاحتواء التام في صفحة واحدة */}
+                <div className="side-by-side-tables">
+                  <table className="official-table compact-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 28, textAlign: "center" }}>م</th>
+                        <th>اسم الطالب الرباعي</th>
+                        <th style={{ width: 85, textAlign: "center" }}>الحالة</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {students.slice(0, 10).map((student, idx) => {
+                        const statusText = getStudentStatusLabel(student);
+                        const statusRaw = getStudentStatusRaw(student);
+                        let rowBg = "#ffffff";
+                        let textColor = "#0f172a";
+                        if (statusRaw === "approved") {
+                          rowBg = "#f0fdf4";
+                          textColor = "#166534";
+                        } else if (statusRaw === "not_submitted") {
+                          rowBg = "#fef2f2";
+                          textColor = "#991b1b";
+                        } else if (statusRaw === "pending_review" || statusRaw === "returned_for_correction") {
+                          rowBg = "#fffbeb";
+                          textColor = "#92400e";
+                        }
+
+                        return (
+                          <tr key={student.id} style={{ backgroundColor: rowBg }}>
+                            <td style={{ textAlign: "center", color: textColor, fontWeight: 700 }}>{idx + 1}</td>
+                            <td><strong style={{ color: textColor, fontSize: 11 }}>{student.full_name}</strong></td>
+                            <td style={{ textAlign: "center" }}>
+                              <strong style={{ color: textColor, fontSize: 11 }}>{statusText}</strong>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+
+                  <table className="official-table compact-table">
+                    <thead>
+                      <tr>
+                        <th style={{ width: 28, textAlign: "center" }}>م</th>
+                        <th>اسم الطالب الرباعي</th>
+                        <th style={{ width: 85, textAlign: "center" }}>الحالة</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {students.slice(10, 20).map((student, idx) => {
+                        const statusText = getStudentStatusLabel(student);
+                        const statusRaw = getStudentStatusRaw(student);
+                        let rowBg = "#ffffff";
+                        let textColor = "#0f172a";
+                        if (statusRaw === "approved") {
+                          rowBg = "#f0fdf4";
+                          textColor = "#166534";
+                        } else if (statusRaw === "not_submitted") {
+                          rowBg = "#fef2f2";
+                          textColor = "#991b1b";
+                        } else if (statusRaw === "pending_review" || statusRaw === "returned_for_correction") {
+                          rowBg = "#fffbeb";
+                          textColor = "#92400e";
+                        }
+
+                        return (
+                          <tr key={student.id} style={{ backgroundColor: rowBg }}>
+                            <td style={{ textAlign: "center", color: textColor, fontWeight: 700 }}>{idx + 11}</td>
+                            <td><strong style={{ color: textColor, fontSize: 11 }}>{student.full_name}</strong></td>
+                            <td style={{ textAlign: "center" }}>
+                              <strong style={{ color: textColor, fontSize: 11 }}>{statusText}</strong>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+
+            {/* عنوان التقرير الثاني: التقرير التفصيلي الشامل للحسابات والآيبان */}
+            {activeReport === "detailed" && (
+              <>
+                <div className="report-title-block" style={{ padding: "8px 12px", margin: "8px 0 12px" }}>
+                  <h2 style={{ fontSize: 18 }}>التقرير التفصيلي لبيانات المستحقات البنكية للاعبي الفريق</h2>
+                  <p style={{ fontSize: 11, margin: "2px 0 0" }}>أبطال دوري المدارس U13 لعام 2026 — مدرسة عماد الدين زنكي المتوسطة</p>
+                </div>
+
+                <table className="official-table">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 28, textAlign: "center" }}>م</th>
+                      <th style={{ width: 135 }}>اسم الطالب</th>
+                      <th style={{ width: 100, textAlign: "center" }}>رقم الهوية</th>
+                      <th style={{ width: 145 }}>صاحب الحساب</th>
+                      <th style={{ width: 90 }}>اسم البنك</th>
+                      <th style={{ width: 235, textAlign: "center" }}>رقم الحساب / الآيبان (IBAN)</th>
+                      <th style={{ width: 80, textAlign: "center" }}>حالة الاعتماد</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {submissions.map((sub, idx) => {
+                      let ibanVal = sub.student_iban || sub.guardian_iban || "";
+                      ibanVal = ibanVal.trim().toUpperCase();
+                      if (ibanVal && !ibanVal.startsWith("SA")) {
+                        ibanVal = `SA${ibanVal}`;
+                      }
+                      return (
+                        <tr key={sub.id}>
+                          <td style={{ textAlign: "center", fontSize: 11 }}>{idx + 1}</td>
+                          <td style={{ width: 135, wordBreak: "break-word", whiteSpace: "normal" }}>
+                            <strong style={{ fontSize: 11 }}>{sub.students?.full_name}</strong>
+                          </td>
+                          <td dir="ltr" style={{ width: 100, fontFamily: "monospace", textAlign: "center", whiteSpace: "nowrap", fontSize: 11 }}>
+                            {sub.students?.national_id}
+                          </td>
+                          <td style={{ width: 145, wordBreak: "break-word", whiteSpace: "normal", fontSize: 11 }}>
+                            {sub.has_student_bank_account ? "الطالب نفسه" : `ولي الأمر: ${sub.guardian_name}`}
+                          </td>
+                          <td style={{ width: 90, wordBreak: "break-word", whiteSpace: "normal", fontSize: 11 }}>
+                            <strong>{sub.bank_name}</strong>
+                          </td>
+                          <td dir="ltr" style={{ 
+                            width: 235,
+                            fontFamily: "'Courier New', Courier, monospace", 
+                            fontSize: 11, 
+                            fontWeight: 700, 
+                            whiteSpace: "nowrap", 
+                            letterSpacing: "0.2px", 
+                            textAlign: "center" 
+                          }}>
+                            {ibanVal || "مفقود"}
+                          </td>
+                          <td style={{ width: 80, textAlign: "center", fontSize: 11 }}>
+                            <strong>{labels[sub.status] || sub.status}</strong>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                    {submissions.length === 0 && (
+                      <tr>
+                        <td colSpan={7} style={{ textAlign: "center", padding: 20 }}>
+                          لا توجد بيانات مرفوعة حتى الآن.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </>
+            )}
+
+            {/* التوقيعات والاعتماد الرسمي لوزارة التعليم والمدرسة */}
+            <footer className="official-signatures">
+              <div className="signature-col">
+                <strong>معلم التربية البدنية / مدرب الفريق</strong>
+                <p>موسى مهدي الفاهمي</p>
+                <div className="signature-space"></div>
+                <p>التوقيع: ................................</p>
+              </div>
+              <div className="signature-col">
+                <strong>موثق البيانات / مساعد إداري</strong>
+                <p>ياسر محفوظ الحميدي</p>
+                <div className="signature-space"></div>
+                <p>التوقيع: ................................</p>
+              </div>
+              <div className="signature-col">
+                <strong>يعتمد / مدير مدرسة عماد الدين زنكي المتوسطة</strong>
+                <p>عابد عبيد الجدعاني</p>
+                <div className="signature-space"></div>
+                <p>الختم والتوقيع: ................................</p>
+              </div>
+            </footer>
           </div>
-        )}
-      </section>
+        </div>
+      )}
 
       {/* نافذة تقرير استيراد Excel المفصل */}
       {importReport && (
@@ -620,6 +917,6 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
-    </main>
+    </>
   );
 }
